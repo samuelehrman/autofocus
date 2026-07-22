@@ -92,63 +92,72 @@ class Autofocus:
         factor_HR_LHFW = 1.25
         factor_HR_SHFW = 1.25
 
-        LR_LHFW_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell)
-        LR_SHFW_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell)
-        HR_LHFW_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell * 2)
-        HR_SHFW_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 2)
+        LR_LHFW_course_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell)
+        LR_SHFW_course_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell)
+        HR_LHFW_course_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell * 2)
+        HR_SHFW_course_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 2)
 
-
+        LR_LHFW_convergent_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell * 2)
+        LR_SHFW_convergent_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 2)
+        HR_LHFW_convergent_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw, dwell=self.dwell * 4)
+        HR_SHFW_convergent_imaging_conditions = ImagingConditions(res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 4)
 
 
         # Stage 1: Check if Large HFW Quick Scan Gives Good Results
-        LR_LHFW_imaging_conditions.set_imaging_conditions()
+        LR_LHFW_course_imaging_conditions.set_imaging_conditions()
         course_search_IQs_LR_LHFW = self.course_search(bounds, n_points=self.n_points_LR_LHFW)
-        spacing_LR_LHFW = (bounds[1] - bounds[0]) / self.n_points_LR_LHFW
+        spacing_LR_LHFW = (bounds[1] - bounds[0]) / (self.n_points_LR_LHFW - 1)
         CI_LR_LHFW = np.max(course_search_IQs_LR_LHFW) / np.mean(course_search_IQs_LR_LHFW)
 
-        if CI_LR_LHFW < alpha_LR_LHFW: # proceed with converging if large hfw and quick scan gives good results
-            convergent_bounds = (np.max(CI_LR_LHFW) - spacing_LR_LHFW, np.max(CI_LR_LHFW) + spacing_LR_LHFW)
-            wd = self.convergent_search(convergent_bounds, max_iterations=self.max_iterations, tolerance=self.tolerance)
+        if CI_LR_LHFW > alpha_LR_LHFW: # proceed with converging if large hfw and quick scan gives good results
+            course_wd_LR_LHFW = bounds[0] + np.argmax(course_search_IQs_LR_LHFW) * spacing_LR_LHFW
+            convergent_bounds_LR_LHFW = (course_wd_LR_LHFW - spacing_LR_LHFW, course_wd_LR_LHFW + spacing_LR_LHFW)
+            LR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
+            wd = self.convergent_search(convergent_bounds_LR_LHFW, max_iterations=self.max_iterations, tolerance=self.tolerance)
             return wd
 
         # Stage 2: Check if Small HFW Quick Scan Gives Good Results
         else:
-            LR_SHFW_imaging_conditions.set_imaging_conditions()
-            course_search_IQs = self.course_search(bounds, n_points=self.n_points_LR_SHFW)
-            spacing_LR_SHFW = (bounds[1] - bounds[0]) / self.n_points_LR_SHFW
-            CI_LR_SHFW = np.max(course_search_IQs) / np.mean(course_search_IQs)
-            if CI_LR_SHFW < alpha_LR_SHFW:
-                convergent_bounds = (np.max(CI_LR_SHFW) - spacing_LR_SHFW, np.max(CI_LR_SHFW) + spacing_LR_SHFW)
-                wd = self.convergent_search(convergent_bounds, max_iterations=self.max_iterations, tolerance=self.tolerance)
+            LR_SHFW_course_imaging_conditions.set_imaging_conditions()
+            course_search_IQs_LR_SHFW = self.course_search(bounds, n_points=self.n_points_LR_SHFW)
+            spacing_LR_SHFW = (bounds[1] - bounds[0]) / (self.n_points_LR_SHFW - 1)
+            CI_LR_SHFW = np.max(course_search_IQs_LR_SHFW) / np.mean(course_search_IQs_LR_SHFW)
+            if CI_LR_SHFW > alpha_LR_SHFW:
+                course_wd_LR_SHFW = bounds[0] + np.argmax(course_search_IQs_LR_SHFW) * spacing_LR_SHFW
+                convergent_bounds_LR_SHFW = (course_wd_LR_SHFW - spacing_LR_SHFW, course_wd_LR_SHFW + spacing_LR_SHFW)
+                LR_SHFW_convergent_imaging_conditions.set_imaging_conditions()
+                wd = self.convergent_search(convergent_bounds_LR_SHFW, max_iterations=self.max_iterations, tolerance=self.tolerance)
                 return wd
 
         
         # Stage 3: Longer Dwell/Higher S/N (at both small and large HFW and compare which is better)
 
         # get CIs for large HFW
-        HR_LHFW_imaging_conditions.set_imaging_conditions()
-        course_search_IQs_LHFW = self.course_search(bounds, n_points=self.n_points_LS_LHFW) # have double the points
-        spacing_HR_LHFW = (bounds[1] - bounds[0]) / self.n_points_LS_LHFW
-        CI_LHFW = np.max(course_search_IQs_LHFW) / np.mean(course_search_IQs_LHFW)
+        HR_LHFW_course_imaging_conditions.set_imaging_conditions()
+        course_search_IQs_HR_LHFW = self.course_search(bounds, n_points=self.n_points_LS_LHFW) # have double the points
+        spacing_HR_LHFW = (bounds[1] - bounds[0]) / (self.n_points_LS_LHFW - 1)
+        CI_HR_LHFW = np.max(course_search_IQs_HR_LHFW) / np.mean(course_search_IQs_HR_LHFW)
 
         # get CIs for Small HFW
-        HR_SHFW_imaging_conditions.set_imaging_conditions()
-        course_search_IQs_SHFW = self.course_search(bounds, n_points=self.n_points_LS_SHFW) # have double the points
-        spacing_HR_SHFW = (bounds[1] - bounds[0]) / self.n_points_LS_SHFW
-        CI_SHFW = np.max(course_search_IQs_SHFW) / np.mean(course_search_IQs_SHFW)
+        HR_SHFW_course_imaging_conditions.set_imaging_conditions()
+        course_search_IQs_HR_SHFW = self.course_search(bounds, n_points=self.n_points_LS_SHFW) # have double the points
+        spacing_HR_SHFW = (bounds[1] - bounds[0]) / (self.n_points_LS_SHFW - 1)
+        CI_HR_SHFW = np.max(course_search_IQs_HR_SHFW) / np.mean(course_search_IQs_HR_SHFW)
 
-        relative_quality_LHFW = CI_LHFW * factor_CS_HR_LHFW
-        relative_quality_SHFW = CI_SHFW * factor_CS_HR_SHFW
+        relative_quality_HR_LHFW = CI_HR_LHFW * factor_HR_LHFW
+        relative_quality_HR_SHFW = CI_HR_SHFW * factor_HR_SHFW
 
         # Convergent Search on the Better of LHFW and SHFW
-        if relative_quality_LHFW > relative_quality_SHFW:
-            HR_LHFW_imaging_conditions.set_imaging_conditions()
-            HR_LHFW_bounds = (np.max(CI_LHFW) - spacing_HR_LHFW, np.max(CI_LHFW) + spacing_HR_LHFW)
+        if relative_quality_HR_LHFW > relative_quality_HR_SHFW:
+            HR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
+            course_wd_HR_LHFW = bounds[0] + np.argmax(course_search_IQs_HR_LHFW) * spacing_HR_LHFW
+            HR_LHFW_bounds = (course_wd_HR_LHFW - spacing_HR_LHFW, course_wd_HR_LHFW + spacing_HR_LHFW)
             wd = self.convergent_search(HR_LHFW_bounds, max_iterations=self.max_iterations, tolerance=self.tolerance)
             return wd
         else:
-            HR_SHFW_imaging_conditions.set_imaging_conditions()
-            HR_SHFW_bounds = (np.max(CI_SHFW) - spacing_HR_SHFW, np.max(CI_SHFW) + spacing_HR_SHFW)
+            HR_SHFW_convergent_imaging_conditions.set_imaging_conditions()
+            course_wd_HR_SHFW = bounds[0] + np.argmax(course_search_IQs_HR_SHFW) * spacing_HR_SHFW
+            HR_SHFW_bounds = (course_wd_HR_SHFW - spacing_HR_SHFW, course_wd_HR_SHFW + spacing_HR_SHFW)
             wd = self.convergent_search(HR_SHFW_bounds, max_iterations=self.max_iterations, tolerance=self.tolerance)
             return wd
 
