@@ -165,18 +165,25 @@ class Autofocus:
     ######################### Image Quality Metrics #########################
 
     def sobel_variance(self, image):
+        image = image.astype(np.float64)
         sobel_x = sobel(image, axis=0)
         sobel_y = sobel(image, axis=1)
-        variance = np.hypot(sobel_x, sobel_y)
+        variance = np.var(np.hypot(sobel_x, sobel_y))
         return variance
 
     def std(self, image):
+        image = image.astype(np.float64)
         return np.std(image)
 
-    def FFT_power_above_thresh(self, image, threshold=0.01):
-        fft = np.fft.fft2(image)
-        fft_power = np.abs(fft)**2
-        fft_power_above_thresh = np.sum(fft_power > threshold)
-        return fft_power_above_thresh
+    def FFT_power_above_thresh(self, image, freq_thresh=0.1):
+        """High-frequency energy fraction. freq_thresh in cycles/pixel, in (0, 0.5)."""
+        image = image.astype(np.float64)
+        image = image - image.mean()  # reduces DC dominance before normalize
+        power = (np.fft.fft2(image))**2
+        power /= power.sum()  # normalize so all coefficients sum to 1
+        fy = np.fft.fftfreq(image.shape[0])  # cycles/pixel
+        fx = np.fft.fftfreq(image.shape[1])
+        radius = np.sqrt(fy[:, None]**2 + fx[None, :]**2)
+        return power[radius > freq_thresh].sum()
 
 
