@@ -6,13 +6,12 @@ Optimize based off of both total time and accuracy
 
 Explanation of algorithm:
 
-Step 1: It tries to do a quick initial search with a large HFW
+Step 1: Quick coarse search with a large HFW. If CI is high enough, refine (convergent search) around the best WD.
 
-Steo 2: It tries to do a quick search with a small HFW
+Step 2: If not, quick coarse search with a small HFW. If CI is high enough, refine around that best WD.
 
-Step 3: If it hasn't converged, it slows down and has twice the dwell time (ie. higher S/N ratio)
-Check both large and small HFW and determines which one gives a better signal
-Tries to converge with the best metric with higher S/N ratio
+Step 3: If it still hasn't converged, increase dwell (higher S/N).
+Coarse-search both large and small HFW, pick the better signal (CI, with optional preference factors),
+then refine around that best WD with still-higher dwell.
 
-CI index is a measure of the confidence of the measurment being in the right region
-
+CI index = max(IQ) / mean(IQ): confidence that the focus peak is in the right region.
