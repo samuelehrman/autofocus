@@ -4,6 +4,7 @@ from scipy.ndimage import sobel, gaussian_filter
 import numpy as np
 from PIL import Image
 from scipy.optimize import minimize_scalar
+import matplotlib.pyplot as plt
 
 try:
     from autoscript_sdb_microscope_client import SdbMicroscopeClient
@@ -40,6 +41,7 @@ class Autofocus:
         tolerance=1e-5,
         bit_depth=8,
         beam="electron",
+        testing=False,
     ):
         self.microscope = microscope
         self.res = res
@@ -55,6 +57,9 @@ class Autofocus:
         self.tolerance = tolerance
         self.bit_depth = bit_depth
         self.beam = beam
+        self.testing = testing
+        self._testing_wds: list = []
+        self._testing_iqs: list = []
 
     def set_simulating(self, simulating):
         self.simulating = simulating
@@ -106,8 +111,8 @@ class Autofocus:
         return self._beam(beam).working_distance.value
 
     def set_wd(self, wd, beam=None):
-        self._beam(beam).working_distance.value = wd
-        time.sleep(0.1)
+        self._beam(beam).working_distance.set_value_no_degauss(wd)
+        time.sleep(0.01)
 
     def prepare_imaging(
         self,
@@ -172,9 +177,13 @@ class Autofocus:
         return image
 
     def get_microscope_image(self, wd):
-        """Set working distance and grab a frame from the microscope."""
+        t0 = time.perf_counter()
         self.set_wd(wd)
-        return self.grab_frame()
+        t1 = time.perf_counter()
+        frame = self.grab_frame()
+        t2 = time.perf_counter()
+        print(f"        set_wd={t1-t0:.3f}s  grab_frame={t2-t1:.3f}s")
+        return frame
 
     class ImagingConditions:
         def __init__(self, autofocus, res, hfw, dwell):
@@ -198,18 +207,55 @@ class Autofocus:
             return self.get_simulated_image(wd)
         return self.get_microscope_image(wd)
 
+    def compute_metric(self, image):
+        """Compute the sharpness metric from an already-acquired image."""
+        return self.FFT_power_above_thresh(image)
+
     def get_metric(self, wd, simulating=None):
         if simulating is None:
             simulating = self.simulating
         image = self.get_image(wd, simulating=simulating)
-        return self.sobel_variance(image)
+        metric = self.compute_metric(image)
+        if self.testing:
+            self._testing_wds.append(wd)
+            self._testing_iqs.append(metric)
+        return metric
 
-    ######################### Dumb Search Algorithms #########################
+        ######################### Dumb Search Algorithms #########################
 
     def coarse_search(self, bounds, n_points):
         wds = np.linspace(bounds[0], bounds[1], n_points)
-        iqs = np.array([self.get_metric(wd) for wd in wds])
-        return wds, iqs
+
+        # Phase 1: acquire all images without processing
+        images = []
+        t_acq_start = time.perf_counter()
+        for i, wd in enumerate(wds):
+            t0 = time.perf_counter()
+            print(f"    [{i+1}/{n_points}] Acquiring image at WD = {wd*1e3:.4f} mm ...", flush=True)
+            images.append(self.get_image(wd))
+            print(f"      -> acquired in {time.perf_counter()-t0:.3f} s")
+        t_acq_total = time.perf_counter() - t_acq_start
+        print(f"  Acquisition complete: {n_points} images in {t_acq_total:.3f} s "
+              f"({t_acq_total/n_points:.3f} s/image)")
+
+        # Phase 2: process the image stack
+        print(f"  Processing {n_points}-image stack ...")
+        t_proc_start = time.perf_counter()
+        iqs = []
+        for i, (wd, image) in enumerate(zip(wds, images)):
+            t0 = time.perf_counter()
+            metric = self.compute_metric(image)
+            if self.testing:
+                self._testing_wds.append(wd)
+                self._testing_iqs.append(metric)
+            iqs.append(metric)
+            print(f"    [{i+1}/{n_points}] WD = {wd*1e3:.4f} mm -> sharpness = {metric:.4f} "
+                  f"({time.perf_counter()-t0:.3f} s)")
+        t_proc_total = time.perf_counter() - t_proc_start
+        print(f"  Processing complete: {t_proc_total:.3f} s total "
+              f"({t_proc_total/n_points:.3f} s/image)")
+
+        return wds, np.array(iqs)
 
     def confidence_index(self, iqs):
         iqs = np.asarray(iqs, dtype=float)
@@ -231,12 +277,27 @@ class Autofocus:
         return (lo, hi)
 
     def convergent_search(self, bounds, max_iterations=15, tolerance=0.001):
+        print(f"  Convergent search in [{bounds[0]*1e3:.4f}, {bounds[1]*1e3:.4f}] mm "
+              f"(tol={tolerance*1e3:.4f} mm, max_iter={max_iterations}) ...")
+        _eval_count = [0]
+
+        def _neg_metric(wd):
+            _eval_count[0] += 1
+            t0 = time.perf_counter()
+            print(f"    [iter {_eval_count[0]}] WD = {wd*1e3:.4f} mm ...", end=" ", flush=True)
+            m = self.get_metric(wd)
+            print(f"sharpness = {m:.4f}  ({time.perf_counter()-t0:.3f} s)")
+            return -m
+
+        t_conv_start = time.perf_counter()
         result = minimize_scalar(
-            lambda wd: -self.get_metric(wd),
+            _neg_metric,
             bounds=bounds,
             method="bounded",
             options={"xatol": tolerance, "maxiter": max_iterations},
         )
+        print(f"  Convergent search done in {time.perf_counter()-t_conv_start:.3f} s.  "
+              f"Best WD = {result.x*1e3:.4f} mm")
         return result.x
 
     def quadratic_fit(self, bounds, n_points=5):
@@ -250,9 +311,9 @@ class Autofocus:
     ######################### Algorithm Logic #########################
 
     def optimize_wd(self, bounds):
-        alpha_LR_LHFW = 1.25
-        alpha_LR_SHFW = 1.25
-        factor_HR_LHFW = 1.25
+        alpha_LR_LHFW = 1.1
+        alpha_LR_SHFW = 1.1
+        factor_HR_LHFW = 1.1
         factor_HR_SHFW = 1.25
 
         LR_LHFW_coarse_imaging_conditions = self.ImagingConditions(
@@ -282,13 +343,17 @@ class Autofocus:
         )
 
         # Stage 1: quick large-HFW coarse search
+        print(f"\n[Stage 1] Coarse scan (low res, large HFW = {self.hfw*1e3:.3f} mm) "
+              f"over {self.n_points_LR_LHFW} points ...")
         LR_LHFW_coarse_imaging_conditions.set_imaging_conditions()
         wds_LR_LHFW, iqs_LR_LHFW = self.coarse_search(
             bounds, n_points=self.n_points_LR_LHFW
         )
         CI_LR_LHFW = self.confidence_index(iqs_LR_LHFW)
+        print(f"  Confidence index = {CI_LR_LHFW:.3f} (threshold = {alpha_LR_LHFW:.3f})")
 
         if CI_LR_LHFW > alpha_LR_LHFW:
+            print("  CI sufficient -> proceeding to convergent search.")
             convergent_bounds = self.refine_bounds_from_coarse(
                 wds_LR_LHFW, iqs_LR_LHFW, bounds
             )
@@ -303,13 +368,17 @@ class Autofocus:
             )
 
         # Stage 2: quick small-HFW coarse search
+        print(f"\n[Stage 2] Coarse scan (low res, small HFW = {self.hfw/50*1e3:.3f} mm) "
+              f"over {self.n_points_LR_SHFW} points ...")
         LR_SHFW_coarse_imaging_conditions.set_imaging_conditions()
         wds_LR_SHFW, iqs_LR_SHFW = self.coarse_search(
             bounds, n_points=self.n_points_LR_SHFW
         )
         CI_LR_SHFW = self.confidence_index(iqs_LR_SHFW)
+        print(f"  Confidence index = {CI_LR_SHFW:.3f} (threshold = {alpha_LR_SHFW:.3f})")
 
         if CI_LR_SHFW > alpha_LR_SHFW:
+            print("  CI sufficient -> proceeding to convergent search.")
             convergent_bounds = self.refine_bounds_from_coarse(
                 wds_LR_SHFW, iqs_LR_SHFW, bounds
             )
@@ -321,27 +390,34 @@ class Autofocus:
             )
 
         # Stage 3: higher dwell / S/N at both HFWs; refine with the better signal
+        print(f"\n[Stage 3] High-SNR coarse scan at both HFWs ...")
+        print(f"  [Stage 3a] Large HFW = {self.hfw*1e3:.3f} mm, {self.n_points_LS_LHFW} points ...")
         HR_LHFW_coarse_imaging_conditions.set_imaging_conditions()
         wds_HR_LHFW, iqs_HR_LHFW = self.coarse_search(
             bounds, n_points=self.n_points_LS_LHFW
         )
         CI_HR_LHFW = self.confidence_index(iqs_HR_LHFW)
+        print(f"  Confidence index (large HFW) = {CI_HR_LHFW:.3f}")
 
+        print(f"  [Stage 3b] Small HFW = {self.hfw/50*1e3:.3f} mm, {self.n_points_LS_SHFW} points ...")
         HR_SHFW_coarse_imaging_conditions.set_imaging_conditions()
         wds_HR_SHFW, iqs_HR_SHFW = self.coarse_search(
             bounds, n_points=self.n_points_LS_SHFW
         )
         CI_HR_SHFW = self.confidence_index(iqs_HR_SHFW)
+        print(f"  Confidence index (small HFW) = {CI_HR_SHFW:.3f}")
 
         relative_quality_HR_LHFW = CI_HR_LHFW * factor_HR_LHFW
         relative_quality_HR_SHFW = CI_HR_SHFW * factor_HR_SHFW
 
         if relative_quality_HR_LHFW > relative_quality_HR_SHFW:
+            print("  Large HFW has better signal -> using it for convergent search.")
             convergent_bounds = self.refine_bounds_from_coarse(
                 wds_HR_LHFW, iqs_HR_LHFW, bounds
             )
             HR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
         else:
+            print("  Small HFW has better signal -> using it for convergent search.")
             convergent_bounds = self.refine_bounds_from_coarse(
                 wds_HR_SHFW, iqs_HR_SHFW, bounds
             )
@@ -355,10 +431,43 @@ class Autofocus:
 
     def find_optimal_wd(self, bounds):
         """Run the staged optimizer, set the result on the microscope, and return it."""
+        if self.testing:
+            self._testing_wds.clear()
+            self._testing_iqs.clear()
+        print(f"Starting autofocus search in "
+              f"[{bounds[0]*1e3:.3f}, {bounds[1]*1e3:.3f}] mm ...")
+        t_total_start = time.perf_counter()
         wd = self.optimize_wd(bounds)
         if not self.simulating:
+            print(f"\nSetting WD to {wd*1e3:.4f} mm on microscope ...")
             self.set_wd(wd)
+        print(f"\nAutofocus finished in {time.perf_counter()-t_total_start:.3f} s.  "
+              f"Optimal WD = {wd*1e3:.4f} mm")
+        if self.testing:
+            self._plot_testing(wd, bounds)
         return wd
+
+    def _plot_testing(self, optimal_wd, bounds):
+        """Plot all sampled WD vs sharpness metric (only called when testing=True)."""
+        wds_mm = np.array(self._testing_wds) * 1e3
+        iqs = np.array(self._testing_iqs)
+
+        fig, ax = plt.subplots(figsize=(9, 4))
+        ax.scatter(wds_mm, iqs, zorder=5, label="Sampled points", color="steelblue")
+        ax.axvline(
+            optimal_wd * 1e3,
+            color="red",
+            linestyle="--",
+            label=f"Optimal WD = {optimal_wd*1e3:.4f} mm",
+        )
+        ax.axvspan(bounds[0] * 1e3, bounds[1] * 1e3, alpha=0.08, color="gray",
+                   label="Search range")
+        ax.set_xlabel("Working Distance (mm)")
+        ax.set_ylabel("Sharpness Metric (Sobel Variance)")
+        ax.set_title("Autofocus: WD vs Sharpness Metric")
+        ax.legend()
+        fig.tight_layout()
+        plt.show()
 
     ######################### Image Quality Metrics #########################
 
@@ -382,4 +491,4 @@ class Autofocus:
         fy = np.fft.fftfreq(image.shape[0])  # cycles/pixel
         fx = np.fft.fftfreq(image.shape[1])
         radius = np.sqrt(fy[:, None] ** 2 + fx[None, :] ** 2)
-        return power[radius > freq_thresh].sum()
+        return 1/power[radius > freq_thresh].sum()
