@@ -294,7 +294,7 @@ class Autofocus:
             return -m
 
         t_conv_start = time.perf_counter()
-        result = minimize_scalar(
+        min_scalar = minimize_scalar(
             _neg_metric,
             bounds=bounds,
             method="bounded",
@@ -305,30 +305,34 @@ class Autofocus:
         best5 = sorted(_history, key=lambda p: p[1], reverse=True)[:5]
         best5_wds, best5_iqs = zip(*best5) if best5 else ((), ())
 
-        print(f"  Convergent search done in {time.perf_counter()-t_conv_start:.3f} s.  "
-              f"Best WD = {result.x*1e3:.4f} mm")
-        return result.x, best5_wds, best5_iqs
+        def laplacian_fit(self, wds, iqs):
+            # Fit the image metric to a Laplacian
+            loc, scale = stats.laplace.fit(iqs)
+            print(f"Fitted Location (mu): {loc:.4f}")
+            print(f"Fitted Scale (b): {scale:.4f}")
 
-    def laplacian_fit(self, wds, iqs):
-        # Fit the image metric to a Laplacian
-        loc, scale = stats.laplace.fit(iqs)
-        print(f"Fitted Location (mu): {loc:.4f}")
-        print(f"Fitted Scale (b): {scale:.4f}")
+            # Simulate data in the metric and WD space
+            metric_range = np.linspace(min(iqs), max(iqs), 200)
+            wd_range = np.linspace(min(wds), max(iqs), 200)
 
-        # Simulate data in the metric and WD space
-        metric_range = np.linspace(min(iqs), max(iqs), 200)
-        wd_range = np.linspace(min(wds), max(iqs), 200)
+            # Fit a probability distribution function
+            pdf_values = stats.laplace.pdf(metric_range, loc, scale)
 
-        # Fit a probability distribution function
-        pdf_values = stats.laplace.pdf(metric_range, loc, scale)
+            # Find where the peak occurs in metric_range (returns a location)
+            peak_idx, _ = find_peaks(pdf_values)
 
-        # Find where the peak occurs in metric_range (returns a location)
-        peak_idx, _ = find_peaks(pdf_values)
+            # Best values
+            print(f"  Best metric value: {metric_range[peak_idx]:.4f}")
+            print(f"  Best WD value: {wd_range[peak_idx] * 1e3:.4f} mm")
 
-        # Best values
-        print(f"  Best metric value: {metric_range[peak_idx]:.4f}")
-        print(f"  Best WD value: {wds[peak_idx]*1e3:.4f} mm")
-        return float(wds[peak_idx]*1e3)
+            return float(wd_range[peak_idx] * 1e3)
+
+        # Laplacian fit
+        result = laplacian_fit(best5_wds, best5_iqs)
+
+        print(f"  Convergent search done in {time.perf_counter() - t_conv_start:.3f} s.  "
+              f"Best WD = {result} mm")
+        return result
 
     ######################### Algorithm Logic #########################
 
@@ -413,6 +417,7 @@ class Autofocus:
                     max_iterations=self.max_iterations,
                     tolerance=self.tolerance,
                 )
+
             print(f"\n[Stage 2] Coarse scan (low res, small HFW = {self.hfw / 50 * 1e3:.3f} mm) "
                   f"over {self.n_points_LR_SHFW} points ...")
             LR_SHFW_coarse_imaging_conditions.set_imaging_conditions()

@@ -24,7 +24,7 @@ if __name__ == "__main__":
         res=res,
         hfw=hfw,
         dwell=dwell,
-        simulating=False,
+        simulating=True,
         tolerance=tolerance,
         testing=testing,
     )
