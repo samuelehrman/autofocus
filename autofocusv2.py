@@ -34,7 +34,7 @@ class Autofocus:
         self,
         microscope: SdbMicroscopeClient = None,
         res=1536,
-        hfw=1e-3,
+        hfw_large=1e-3,
         dwell=1e-6,
         simulating=False,
         image_path="simulated_image/test.tif",
@@ -47,10 +47,12 @@ class Autofocus:
         bit_depth=8,
         beam="electron",
         testing=False,
+        do_gaussian_fit=True,
+        hfw_small=20e-6,
     ):
         self.microscope = microscope
         self.res = res
-        self.hfw = hfw
+        self.hfw_large = hfw_large
         self.dwell = dwell
         self.simulating = simulating
         self.image_path = image_path
@@ -63,6 +65,8 @@ class Autofocus:
         self.bit_depth = bit_depth
         self.beam = beam
         self.testing = testing
+        self.do_gaussian_fit = do_gaussian_fit
+        self.hfw_small = hfw_small
         self._testing_wds: list = []
         self._testing_iqs: list = []
 
@@ -94,7 +98,10 @@ class Autofocus:
     ######################### Microscope Imaging Controls #########################
 
     def get_resolution(self, beam=None):
-        return self._beam(beam).scanning.resolution.value
+        string = self._beam(beam).scanning.resolution.value
+        x_res = self._beam(beam).scanning.resolution.width
+        y_res = self._beam(beam).scanning.resolution.height
+        return x_res, y_res
 
     def set_resolution(self, resolution, beam=None):
         resolved = self._resolve_resolution(resolution)
@@ -117,7 +124,7 @@ class Autofocus:
 
     def set_wd(self, wd, beam=None):
         self._beam(beam).working_distance.set_value_no_degauss(wd)
-        time.sleep(0.01)
+        # time.sleep(0.01)
 
     def set_reduced_area(self):
         reduced_area = (0.25, 0.25, 0.5, 0.5)
@@ -173,6 +180,14 @@ class Autofocus:
         )
         return np.copy(frame.data)
 
+    def get_image(self, bit_depth=None):
+        # get the image that is currently in the active window when the function is called
+        bit_depth = self.bit_depth if bit_depth is None else bit_depth
+        frame = self.microscope.imaging.get_image(
+            structs.GrabFrameSettings(bit_depth=bit_depth)
+        )
+        return np.copy(frame.data)
+
     def get_simulated_image(self, wd, image_path=None):
         image_path = image_path or self.image_path
         wd_ideal = 0.008
@@ -186,9 +201,11 @@ class Autofocus:
         return image
 
     def get_microscope_image(self, wd):
+        image_time = self.get_resolution()[0] * self.get_resolution()[1] * self.dwell
         t0 = time.perf_counter()
         self.set_wd(wd)
         t1 = time.perf_counter()
+        # frame = self.grab_frame()
         frame = self.grab_frame()
         t2 = time.perf_counter()
         print(f"        set_wd={t1-t0:.3f}s  grab_frame={t2-t1:.3f}s")
@@ -201,6 +218,7 @@ class Autofocus:
             self.hfw = hfw
             self.dwell = dwell
             self.reduced_area = reduced_area
+
         def set_imaging_conditions(self):
             """Apply res / hfw / dwell on the microscope."""
             self.autofocus.prepare_imaging(
@@ -241,12 +259,17 @@ class Autofocus:
         t_acq_start = time.perf_counter()
         for i, wd in enumerate(wds):
             t0 = time.perf_counter()
-            print(f"    [{i+1}/{n_points}] Acquiring image at WD = {wd*1e3:.4f} mm ...", flush=True)
+            print(
+                f"    [{i+1}/{n_points}] Acquiring image at WD = {wd*1e3:.4f} mm ...",
+                flush=True,
+            )
             images.append(self.get_image(wd))
             print(f"      -> acquired in {time.perf_counter()-t0:.3f} s")
         t_acq_total = time.perf_counter() - t_acq_start
-        print(f"  Acquisition complete: {n_points} images in {t_acq_total:.3f} s "
-              f"({t_acq_total/n_points:.3f} s/image)")
+        print(
+            f"  Acquisition complete: {n_points} images in {t_acq_total:.3f} s "
+            f"({t_acq_total/n_points:.3f} s/image)"
+        )
 
         # Phase 2: process the image stack
         print(f"  Processing {n_points}-image stack ...")
@@ -259,11 +282,15 @@ class Autofocus:
                 self._testing_wds.append(wd)
                 self._testing_iqs.append(metric)
             iqs.append(metric)
-            print(f"    [{i+1}/{n_points}] WD = {wd*1e3:.4f} mm -> sharpness = {metric:.4f} "
-                  f"({time.perf_counter()-t0:.3f} s)")
+            print(
+                f"    [{i+1}/{n_points}] WD = {wd*1e3:.4f} mm -> sharpness = {metric:.4f} "
+                f"({time.perf_counter()-t0:.3f} s)"
+            )
         t_proc_total = time.perf_counter() - t_proc_start
-        print(f"  Processing complete: {t_proc_total:.3f} s total "
-              f"({t_proc_total/n_points:.3f} s/image)")
+        print(
+            f"  Processing complete: {t_proc_total:.3f} s total "
+            f"({t_proc_total/n_points:.3f} s/image)"
+        )
 
         return wds, np.array(iqs)
 
@@ -287,15 +314,26 @@ class Autofocus:
         return (lo, hi)
 
     def convergent_search(self, bounds, max_iterations=15, tolerance=0.001):
-        print(f"  Convergent search in [{bounds[0]*1e3:.4f}, {bounds[1]*1e3:.4f}] mm "
-              f"(tol={tolerance*1e3:.4f} mm, max_iter={max_iterations}) ...")
+        print(
+            f"  Convergent search in [{bounds[0]*1e3:.4f}, {bounds[1]*1e3:.4f}] mm "
+            f"(tol={tolerance*1e3:.4f} mm, max_iter={max_iterations}) ..."
+        )
+        
         _eval_count = [0]
-        _history = [] # (wd, metric)
+        _history = []  # (wd, metric)
+
+
+        image_time = self.get_resolution()[0] * self.get_resolution()[1] * self.dwell
+        print(f"Estimated image time: {image_time} s")
 
         def _neg_metric(wd):
             _eval_count[0] += 1
             t0 = time.perf_counter()
-            print(f"    [iter {_eval_count[0]}] WD = {wd*1e3:.4f} mm ...", end=" ", flush=True)
+            print(
+                f"    [iter {_eval_count[0]}] WD = {wd*1e3:.4f} mm ...",
+                end=" ",
+                flush=True,
+            )
             m = self.get_metric(wd)
             print(f"sharpness = {m:.4f}  ({time.perf_counter()-t0:.3f} s)")
             _history.append((wd, m))
@@ -310,11 +348,13 @@ class Autofocus:
         )
 
         # Fit to the converged points
-        best5 = sorted(_history, key=lambda p: p[1], reverse=True)[:len(_history)]
+        best5 = sorted(_history, key=lambda p: p[1], reverse=True)[: len(_history)]
         best5_wds, best5_iqs = zip(*best5) if best5 else ((), ())
 
-        print(f"  Convergent search done in {time.perf_counter()-t_conv_start:.3f} s.  "
-              f"Best WD = {result.x*1e3:.4f} mm")
+        print(
+            f"  Convergent search done in {time.perf_counter()-t_conv_start:.3f} s.  "
+            f"Best WD = {result.x*1e3:.4f} mm"
+        )
         return result.x, best5_wds, best5_iqs
 
     def laplacian_fit(self, wds, iqs):
@@ -336,200 +376,115 @@ class Autofocus:
         # Best values
         print(f"  Best metric value: {metric_range[peak_idx]:.4f}")
         print(f"  Best WD value: {wds[peak_idx]*1e3:.4f} mm")
-        return float(wds[peak_idx]*1e3)
-
+        return float(wds[peak_idx] * 1e3)
 
     def general_gaussian(self, x, h, A, mu, sigma):
-        return h + A * np.exp(-((x - mu) ** 2) / (2 * sigma ** 2))
+        return h + A * np.exp(-((x - mu) ** 2) / (2 * sigma**2))
 
     def gaussian_fit(self, wds, iqs):
         initial_guess = [min(iqs), max(iqs) - min(iqs), np.mean(wds), np.std(wds)]
         popt, pcov = curve_fit(self.general_gaussian, wds, iqs, p0=initial_guess)
 
         h, A, mu, sigma = popt
-        print(f"Fitted parameters: h={h:.4f}, A={A:.4f}, mu={mu:.4f}, sigma={sigma:.4f}")
+        print(
+            f"Fitted parameters: h={h:.4f}, A={A:.4f}, mu={mu:.4f}, sigma={sigma:.4f}"
+        )
 
         return h, A, mu, sigma
 
-    
     ######################### Algorithm Logic #########################
 
     def optimize_wd(self, bounds):
-        alpha_LR_LHFW = 1.1
-        alpha_LR_SHFW = 1.1
-        factor_HR_LHFW = 1.0
-        factor_HR_SHFW = 1.0
+        # alpha_LR_LHFW = 1.1
+        # alpha_LR_SHFW = 1.1
+        # factor_HR_LHFW = 1.0
+        # factor_HR_SHFW = 1.0
 
-        LR_LHFW_coarse_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw, dwell=self.dwell
+        imaging_conditions = self.ImagingConditions(
+            self, res=self.res, hfw=self.hfw_large, dwell=self.dwell
         )
-        LR_SHFW_coarse_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw / 50, dwell=self.dwell
+        imaging_conditions.set_imaging_conditions()
+        # LR_SHFW_coarse_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_small, dwell=self.dwell
+        # )
+        # HR_LHFW_coarse_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_large, dwell=self.dwell * 2
+        # )
+        # HR_SHFW_coarse_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_small, dwell=self.dwell * 2
+        # )
+
+        # LR_LHFW_convergent_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_large, dwell=self.dwell * 2
+        # )
+        # LR_SHFW_convergent_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_small, dwell=self.dwell * 2
+        # )
+        # HR_LHFW_convergent_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_large, dwell=self.dwell * 4
+        # )
+        # HR_SHFW_convergent_imaging_conditions = self.ImagingConditions(
+        #     self, res=self.res, hfw=self.hfw_small, dwell=self.dwell * 4
+        # )
+
+        ############# ALROGIRTHM LOGIC #############
+
+        wd_optimized, best5wds, best5iqs = self.convergent_search(
+            bounds,
+            max_iterations=self.max_iterations,
+            tolerance=self.tolerance,
         )
-        HR_LHFW_coarse_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw, dwell=self.dwell * 2
-        )
-        HR_SHFW_coarse_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 2
-        )
 
-        LR_LHFW_convergent_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw, dwell=self.dwell * 2
-        )
-        LR_SHFW_convergent_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 2
-        )
-        HR_LHFW_convergent_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw, dwell=self.dwell * 4
-        )
-        HR_SHFW_convergent_imaging_conditions = self.ImagingConditions(
-            self, res=self.res, hfw=self.hfw / 50, dwell=self.dwell * 4
-        )
+        if not self.do_gaussian_fit:
+            return wd_optimized
 
-        # Stage 1: Fine search since we should already be close to focused
-        # higher dwell / S/N at both HFWs; refine with the better signal
-        print(f"\n[Stage 1] High-SNR coarse scan at both HFWs ...")
-        print(f"  [Stage 1a] Large HFW = {self.hfw * 1e3:.3f} mm, {self.n_points_LS_LHFW} points ...")
-        HR_LHFW_coarse_imaging_conditions.set_imaging_conditions()
-        self.set_reduced_area()
-        wds_HR_LHFW, iqs_HR_LHFW = self.coarse_search(
-            bounds, n_points=self.n_points_LS_LHFW
-        )
-        CI_HR_LHFW = self.confidence_index(iqs_HR_LHFW)
-        print(f"  Confidence index (large HFW) = {CI_HR_LHFW:.3f}")
-
-        print(f"  [Stage 1b] Small HFW = {self.hfw / 50 * 1e3:.3f} mm, {self.n_points_LS_SHFW} points ...")
-        HR_SHFW_coarse_imaging_conditions.set_imaging_conditions()
-        self.set_reduced_area()
-        wds_HR_SHFW, iqs_HR_SHFW = self.coarse_search(
-            bounds, n_points=self.n_points_LS_SHFW
-        )
-        CI_HR_SHFW = self.confidence_index(iqs_HR_SHFW)
-        print(f"  Confidence index (small HFW) = {CI_HR_SHFW:.3f}")
-
-        relative_quality_HR_LHFW = CI_HR_LHFW * factor_HR_LHFW
-        relative_quality_HR_SHFW = CI_HR_SHFW * factor_HR_SHFW
-
-        if CI_HR_LHFW < alpha_LR_LHFW and CI_HR_SHFW < alpha_LR_SHFW:
-            print("  GARBAGE GARBAGE GARBAGE.")
-
-            # # Stage 2: quick large-HFW coarse search
-            # print(f"\n[Stage 2] Coarse scan (low res, large HFW = {self.hfw * 1e3:.3f} mm) "
-            #       f"over {self.n_points_LR_LHFW} points ...")
-            # LR_LHFW_coarse_imaging_conditions.set_imaging_conditions()
-            # wds_LR_LHFW, iqs_LR_LHFW = self.coarse_search(
-            #     bounds, n_points=self.n_points_LR_LHFW
-            # )
-            # CI_LR_LHFW = self.confidence_index(iqs_LR_LHFW)
-            # print(f"  Confidence index = {CI_LR_LHFW:.3f} (threshold = {alpha_LR_LHFW:.3f})")
-
-            # if CI_LR_LHFW > alpha_LR_LHFW:
-            #     print("  CI sufficient -> proceeding to convergent search.")
-            #     convergent_bounds = self.refine_bounds_from_coarse(
-            #         wds_LR_LHFW, iqs_LR_LHFW, bounds
-            #     )
-            #     LR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
-
-            #     ## future work -> check if results converge and if not go to next stage
-            #     wd_optimized, best5_wds, best5_iqs   = self.convergent_search(
-            #         convergent_bounds,
-            #         max_iterations=self.max_iterations,
-            #         tolerance=self.tolerance,
-            #     )
-            #     return wd_optimized
-
-            # print(f"\n[Stage 2] Coarse scan (low res, small HFW = {self.hfw / 50 * 1e3:.3f} mm) "
-            #       f"over {self.n_points_LR_SHFW} points ...")
-            # LR_SHFW_coarse_imaging_conditions.set_imaging_conditions()
-            # wds_LR_SHFW, iqs_LR_SHFW = self.coarse_search(
-            #     bounds, n_points=self.n_points_LR_SHFW
-            # )
-            # CI_LR_SHFW = self.confidence_index(iqs_LR_SHFW)
-            # print(f"  Confidence index = {CI_LR_SHFW:.3f} (threshold = {alpha_LR_SHFW:.3f})")
-
-            # if CI_LR_SHFW > alpha_LR_SHFW:
-            #     print("  CI sufficient -> proceeding to convergent search.")
-            #     convergent_bounds = self.refine_bounds_from_coarse(
-            #         wds_LR_SHFW, iqs_LR_SHFW, bounds
-            #     )
-            #     LR_SHFW_convergent_imaging_conditions.set_imaging_conditions()
-
-            #     wd_optimized, best5_wds, best5_iqs   = self.convergent_search(
-            #     convergent_bounds,
-            #     max_iterations=self.max_iterations,
-            #     tolerance=self.tolerance,
-            #     )
-            #     return wd_optimized
-
-        # else:
-        #     if relative_quality_HR_LHFW > relative_quality_HR_SHFW:
-        #         print("  Large HFW has better signal -> using it for convergent search.")
-        #         convergent_bounds = self.refine_bounds_from_coarse(
-        #             wds_HR_LHFW, iqs_HR_LHFW, bounds
-        #         )
-        #         HR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
-        #     else:
-        #         print("  Small HFW has better signal -> using it for convergent search.")
-        #         convergent_bounds = self.refine_bounds_from_coarse(
-        #             wds_HR_SHFW, iqs_HR_SHFW, bounds
-        #         )
-        #         HR_SHFW_convergent_imaging_conditions.set_imaging_conditions()
-
-
-        if relative_quality_HR_LHFW > relative_quality_HR_SHFW:
-            print("  Large HFW has better signal -> using it for convergent search.")
-            convergent_bounds = self.refine_bounds_from_coarse(
-                wds_HR_LHFW, iqs_HR_LHFW, bounds
-            )
-            HR_LHFW_convergent_imaging_conditions.set_imaging_conditions()
         else:
-            print("  Small HFW has better signal -> using it for convergent search.")
-            convergent_bounds = self.refine_bounds_from_coarse(
-                wds_HR_SHFW, iqs_HR_SHFW, bounds
-            )
-            HR_SHFW_convergent_imaging_conditions.set_imaging_conditions()
+            h, A, mu, sigma = self.gaussian_fit(best5wds, best5iqs)
+            if self.testing:
+                self.gaussian_plotter(best5wds, best5iqs, h, A, mu, sigma)
+            if A < 0:
+                print(
+                    "  Warning: Gaussian fit amplitude is negative. Using converged WD."
+                )
+                return wd_optimized
 
-        wd_optimized, best5_wds, best5_iqs   = self.convergent_search(
-        bounds,
-        max_iterations=self.max_iterations,
-        tolerance=self.tolerance,
-        )
-        h, A, mu, sigma = self.gaussian_fit(best5_wds, best5_iqs)
-        if self.testing:
-            self.gaussian_plotter(best5_wds, best5_iqs, h, A, mu, sigma)
+            wd_optimized = mu  # else use the gaussian fit mean
+            return wd_optimized
 
-        wd_optimized = mu
-        return wd_optimized
-
-    def gaussian_plotter(self, best5_wds, best5_iqs, h, A, mu, sigma):
+    def gaussian_plotter(self, best5wds, best5iqs, h, A, mu, sigma):
         plt.figure(figsize=(8, 5))
-        plt.scatter(best5_wds, best5_iqs, color='blue', label='Best 5 Points')
-        x_fit = np.linspace(min(best5_wds), max(best5_wds), 100)
+        plt.scatter(best5wds, best5iqs, color="blue", label="Best 5 Points")
+        x_fit = np.linspace(min(best5wds), max(best5wds), 100)
         y_fit = self.general_gaussian(x_fit, h, A, mu, sigma)
-        plt.plot(x_fit, y_fit, color='red', label='Gaussian Fit')
-        plt.axvline(mu, color='green', linestyle='--', label=f'Optimal WD = {mu*1e3:.4f} mm')
-        plt.title('Gaussian Fit to Sharpness Metric vs WD')
-        plt.xlabel('Working Distance (m)')
-        plt.ylabel('Sharpness Metric (Sobel Variance)')
+        plt.plot(x_fit, y_fit, color="red", label="Gaussian Fit")
+        plt.axvline(
+            mu, color="green", linestyle="--", label=f"Optimal WD = {mu*1e3:.4f} mm"
+        )
+        plt.title("Gaussian Fit to Sharpness Metric vs WD")
+        plt.xlabel("Working Distance (m)")
+        plt.ylabel("Sharpness Metric (Sobel Variance)")
         plt.legend()
         plt.grid()
         plt.show()
-
 
     def find_optimal_wd(self, bounds):
         """Run the staged optimizer, set the result on the microscope, and return it."""
         if self.testing:
             self._testing_wds.clear()
             self._testing_iqs.clear()
-        print(f"Starting autofocus search in "
-              f"[{bounds[0]*1e3:.3f}, {bounds[1]*1e3:.3f}] mm ...")
+        print(
+            f"Starting autofocus search in "
+            f"[{bounds[0]*1e3:.3f}, {bounds[1]*1e3:.3f}] mm ..."
+        )
         t_total_start = time.perf_counter()
         wd = self.optimize_wd(bounds)
         if not self.simulating:
             print(f"\nSetting WD to {wd*1e3:.4f} mm on microscope ...")
             self.set_wd(wd)
-        print(f"\nAutofocus finished in {time.perf_counter()-t_total_start:.3f} s.  "
-              f"Optimal WD = {wd*1e3:.4f} mm")
+        print(
+            f"\nAutofocus finished in {time.perf_counter()-t_total_start:.3f} s.  "
+            f"Optimal WD = {wd*1e3:.4f} mm"
+        )
         if self.testing:
             self._plot_testing(wd, bounds)
         return wd
@@ -547,8 +502,13 @@ class Autofocus:
             linestyle="--",
             label=f"Optimal WD = {optimal_wd*1e3:.4f} mm",
         )
-        ax.axvspan(bounds[0] * 1e3, bounds[1] * 1e3, alpha=0.08, color="gray",
-                   label="Search range")
+        ax.axvspan(
+            bounds[0] * 1e3,
+            bounds[1] * 1e3,
+            alpha=0.08,
+            color="gray",
+            label="Search range",
+        )
         ax.set_xlabel("Working Distance (mm)")
         ax.set_ylabel("Sharpness Metric (Sobel Variance)")
         ax.set_title("Autofocus: WD vs Sharpness Metric")
@@ -578,4 +538,4 @@ class Autofocus:
         fy = np.fft.fftfreq(image.shape[0])  # cycles/pixel
         fx = np.fft.fftfreq(image.shape[1])
         radius = np.sqrt(fy[:, None] ** 2 + fx[None, :] ** 2)
-        return 1/power[radius > freq_thresh].sum()
+        return 1 / power[radius > freq_thresh].sum()

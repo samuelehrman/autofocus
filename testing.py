@@ -1,14 +1,16 @@
+import time
+
 from autoscript_sdb_microscope_client import SdbMicroscopeClient
-from autofocusv3 import Autofocus
+from autofocusv2 import Autofocus
 
 if __name__ == "__main__":
     # ── Settings ─────────────────────────────────────────────────────────
-    bounds = (4e-3, 5e-3)  # WD search range in metres (e.g. 6 mm to 10 mm)
+    bounds = (0.013, 0.014)  # WD search range in metres (e.g. 6 mm to 10 mm)
     beam = "electron"  # "electron" or "ion"
     res = 768  # scan resolution: 768, 1536, 3072, or 6144
-    hfw_large = 200e-6  # coarse-search horizontal field width (m)
-    # hfw_small = 20e-6  # fine-search horizontal field width (m)
-    dwell = 3e-6  # coarse-search dwell time (s)
+    hfw_large = 10e-6  # coarse-search horizontal field width (m)
+    hfw_small = 20e-6  # fine-search horizontal field width (m)
+    dwell = 1e-6  # coarse-search dwell time (s)
     tolerance = 1e-6  # convergence tolerance (m)
     testing = True  # set True to plot WD vs sharpness metric after the run
     gaussian_fit = (
@@ -27,7 +29,7 @@ if __name__ == "__main__":
         beam=beam,
         res=res,
         hfw_large=hfw_large,
-        # hfw_small=hfw_small,
+        hfw_small=hfw_small,
         dwell=dwell,
         simulating=False,
         tolerance=tolerance,
@@ -35,6 +37,52 @@ if __name__ == "__main__":
         do_gaussian_fit=gaussian_fit,
     )
 
-    print(f"Searching WD in [{bounds[0]*1e3:.3f}, {bounds[1]*1e3:.3f}] mm ...")
-    optimal_wd = af.find_optimal_wd(bounds)
-    print(f"Autofocus complete.  Optimal WD: {optimal_wd * 1e3:.3f} mm")
+    # af.set_wd(0.003)
+    # af.set_wd(0.004)
+    # af.set_wd(0.005)
+    # af.set_wd(0.0138)
+
+
+    # print(af.get_resolution()[0])
+    # print(af.get_resolution()[1])
+
+    # # x resolution
+
+    # print(af.get_dwell())
+
+    image_time = af.get_resolution()[0] * af.get_resolution()[1] * af.dwell
+    print(image_time)
+
+    af.set_wd(0.0138)
+    time.sleep(image_time)
+    
+    af.set_wd(0.014)
+    time.sleep(image_time)
+
+    af.set_wd(0.0138)
+    time.sleep(image_time)
+
+    af.set_wd(0.014)
+    time.sleep(image_time)
+
+    af.set_wd(0.013)
+    time.sleep(image_time)
+
+    af.set_wd(0.014)
+    time.sleep(image_time)
+
+    af.set_wd(0.0138)
+    time.sleep(image_time)
+
+    af.set_wd(0.014)
+    time.sleep(image_time)
+
+    af.set_wd(0.0138)
+    time.sleep(image_time)
+
+    af.set_wd(0.014)
+    time.sleep(image_time)
+
+    af.set_wd(0.0138)
+    time.sleep(image_time)
+            
